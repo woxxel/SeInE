@@ -1,3 +1,4 @@
+# from multiprocessing.pool import Pool
 import logging, os
 
 # os.environ["OMP_NUM_THREADS"] = "1"
@@ -16,10 +17,20 @@ from scipy.interpolate import interp1d
 from dynesty import NestedSampler  # , pool as dypool
 import pathos.multiprocessing as mp
 
+# import dill
+# import dynesty.utils
+# from dynesty import pool as dypool
+
 # from pathos.multiprocessing import ProcessingPool
 
 from .structures import parse_name_and_indices
-from .functions import circmean as weighted_circmean, modulo_with_offset
+from .functions import (
+    circmean as weighted_circmean,
+    circmean_and_std,
+    modulo_with_offset,
+)
+
+# dynesty.utils.pickle_module = dill
 
 
 class PathosPool:
@@ -76,14 +87,21 @@ def run_sampling(
         # using dypool pool sadly does not work, as it does not support pickling class methods for v3.+
         # choice for pathos as alternative is on a whim
         pool = PathosPool(nP)
+        # with dypool.Pool(nP, loglikelihood, prior_transform) as pool:
         sampler = NestedSampler(
+            # sampler = DynamicNestedSampler(
             loglikelihood,
             prior_transform,
             pool=pool,
-            queue_size=pool.size,
+            # queue_size=pool.size,
             **options,
         )
-        sampler.run_nested(dlogz=dlogz, print_progress=show_status)
+        sampler.run_nested(
+            dlogz=dlogz,
+            print_progress=show_status,
+            # dlogz_init=dlogz, nlive_init=n_live, print_progress=show_status
+        )
+        # pool.close()
     else:
         sampler = NestedSampler(
             loglikelihood,
@@ -131,7 +149,10 @@ def get_single_posterior_from_samples(
         low, high = periodic
         diff = high - low
 
-        posterior["mean"] = weighted_circmean(samp, weights=weights, low=low, high=high)
+        # posterior["mean"] = weighted_circmean(samp, weights=weights, low=low, high=high)
+        posterior["mean"], posterior["stdev"] = circmean_and_std(
+            samp, weights=weights, low=low, high=high
+        )
         shift_from_center = (
             posterior["mean"] - low - diff / 2.0
         )  # shift field to the center
@@ -142,6 +163,7 @@ def get_single_posterior_from_samples(
     else:
         low, high = None, None
         posterior["mean"] = (samp * weights).sum()
+        posterior["stdev"] = np.sqrt((weights * (samp - posterior["mean"]) ** 2).sum())
 
     idx_sorted = np.argsort(samp)
     samples_sorted = samp[idx_sorted]
@@ -153,7 +175,6 @@ def get_single_posterior_from_samples(
     quants = np.interp(qs, cumsw, samples_sorted)
 
     posterior["CI"] = modulo_with_offset(quants[1:-1], low, high)
-    posterior["stdev"] = np.sqrt((weights * (samp - posterior["mean"]) ** 2).sum())
 
     if x is not None:
         f = interp1d(
@@ -199,7 +220,20 @@ def get_posterior_from_samples(
     return posterior
 
 
-def plot_results(BM,results,mode="dynesty",truths=None):
+def get_posteriors(hbm, results, mode="dynesty"):
+    samples = get_samples_from_results(results, mode=mode)
+
+    posterior = get_posterior_from_samples(
+        samples["samples"],
+        samples["weights"],
+        parameter_names=hbm.parameter_names_all,
+        periodic=hbm.periodic_boundaries,
+    )
+
+    return posterior
+
+
+def plot_results(BM, results, mode="dynesty", truths=None, fig=None):
 
     # priors = {key:prior for key,prior in BM.priors.items() if prior["transform"] is not None}
 
@@ -216,14 +250,29 @@ def plot_results(BM,results,mode="dynesty",truths=None):
         key: samples["samples"][:, i] for i, key in enumerate(BM.parameter_names_all)
     }
 
-    plot_params = [key for key in BM.parameter_names if BM.priors[key]["transform"] is not None]
-    fig,axes = plt.subplots(nrows=len(plot_params), ncols=1, figsize=(10, 1.5*len(plot_params)),sharex=True)
-    for i,key in enumerate(plot_params):
+    plot_params = [
+        key for key in BM.parameter_names if BM.priors[key]["transform"] is not None
+    ]
+    if fig is None:
+        fig = plt.figure(figsize=(10, 1.5 * len(plot_params)), layout="constrained")
+        # fig, axes = plt.subplots(
+        #     nrows=len(plot_params),
+        #     ncols=1,
+        #     figsize=(10, 1.5 * len(plot_params)),
+        #     sharex=True,
+        # )
+    # else:
+    axes = fig.subplots(nrows=len(plot_params), ncols=1, sharex=True)
+    if len(plot_params) == 1:
+        axes = [axes]
+    for i, key in enumerate(plot_params):
         prior = BM.priors[key]
         if not prior["transform"]:
             continue
 
         title_str = prior["label"] if prior["label"] is not None else key
+        axes[i].set_ylabel(title_str)
+        title_str = ""
         if prior["n"] == 1:
             # print("Single population model")
             plot_prior(axes[i], prior, color="tab:green", label="prior")
@@ -239,18 +288,22 @@ def plot_results(BM,results,mode="dynesty",truths=None):
             )
 
             if truths and key in truths:
-                axes[i].axhline(truths[key], color="tab:red", linestyle="--", label="truth")
+                axes[i].axhline(
+                    truths[key], color="tab:red", linestyle="--", label="truth"
+                )
         else:
             # print("Multi-population model")
 
-            y_max = 0.
+            y_max = 0.0
 
             colors = ["tab:green", "tab:blue"]
             if prior["has_meta"]:
-                for var,col in zip(prior["input_vars"],colors):
+                for var, col in zip(prior["input_vars"], colors):
                     key_hierarchy = f"{key}_{var}"
                     # print(key_hierarchy, BM.priors[key_hierarchy])
-                    plot_prior(axes[i], BM.priors[key_hierarchy], color=col, label="prior")
+                    plot_prior(
+                        axes[i], BM.priors[key_hierarchy], color=col, label="prior"
+                    )
                     plot_posterior(
                         axes[i],
                         samples_dict[key_hierarchy],
@@ -258,20 +311,27 @@ def plot_results(BM,results,mode="dynesty",truths=None):
                         posterior[key_hierarchy],
                         color=col,
                     )
-                    axes[i].axhline(posterior[key_hierarchy]["mean"], color=col, linestyle="--", label="posterior (meta)")
+                    axes[i].axhline(
+                        posterior[key_hierarchy]["mean"],
+                        color=col,
+                        linestyle="--",
+                        label="posterior (meta)",
+                    )
 
-                    if var=="mean":
+                    if var == "mean":
                         y_max = max(y_max, posterior[key_hierarchy]["CI"][-1])
 
                         title_str += f" [${posterior[key_hierarchy]['mean']:.3f}\\pm{posterior[key_hierarchy]['stdev']:.3f}$]"
 
                 if truths and key in truths:
-                    axes[i].axhline(truths[key], color="tab:red", linestyle="--", label="truth")
+                    axes[i].axhline(
+                        truths[key], color="tab:red", linestyle="--", label="truth"
+                    )
             else:
                 plot_prior(axes[i], prior, color="tab:green", label="prior")
 
             for n in range(prior["n"]):
-                bottom = 1.+n/2
+                bottom = 1.0 + n / 2
                 plot_posterior(
                     axes[i],
                     samples_dict[f"{key}_{n}"],
@@ -295,25 +355,50 @@ def plot_results(BM,results,mode="dynesty",truths=None):
 
                     if truths and (key in truths):
                         if isinstance(truths[key], (list, np.ndarray)):
-                            truth = truths[key][n] if n<len(truths[key]) else truths[key][0]
+                            truth = (
+                                truths[key][n]
+                                if n < len(truths[key])
+                                else truths[key][0]
+                            )
                         else:
                             truth = truths[key]
 
-                        axes[i].plot([bottom,bottom+1./2],[truth]*2,color="tab:red", linestyle="--", label="truth")
+                        axes[i].plot(
+                            [bottom, bottom + 1.0 / 2],
+                            [truth] * 2,
+                            color="tab:red",
+                            linestyle="--",
+                            label="truth",
+                        )
 
             plt.setp(axes[i], ylim=(0, y_max))
 
-        axes[i].set_title(title_str)
-        axes[i].spines[["top","right"]].set_visible(False)
-        if i==0:
-            axes[i].legend()
-    plt.setp(axes[-1],
-            xticks=(0,)+tuple(np.linspace(1,1+BM.dimensions["shape"][0]/2-0.5,BM.dimensions["shape"][0])),
-            xticklabels=("meta",) + tuple(f"n={n+1}" for n in range(BM.dimensions["shape"][0]))
+        axes[i].text(
+            0.95, 0.9, title_str, transform=axes[i].transAxes, va="top", ha="right"
         )
+        axes[i].spines[["top", "right"]].set_visible(False)
+        if i == 0:
+            axes[i].legend(
+                loc="lower right", bbox_to_anchor=(1.02, 0.02), borderaxespad=0
+            )
+    if BM.dimensions["n_iter"] > 0:
+        plt.setp(
+            axes[-1],
+            xticks=(0,)
+            + tuple(
+                np.linspace(
+                    1, 1 + BM.dimensions["n_iter"] / 2 - 0.5, BM.dimensions["n_iter"]
+                )
+            ),
+            xticklabels=("meta",)
+            + tuple(f"n={n+1}" for n in range(BM.dimensions["n_iter"])),
+        )
+    else:
+        plt.setp(axes[-1], xticks=[], xticklabels=[])
 
     # plt.setp(axes[0],xlim=(0,4))
     plt.tight_layout()
+    plt.subplots_adjust(left=0.2, right=0.95, top=0.9, bottom=0.05)
 
 
 from scipy.ndimage import gaussian_filter
@@ -334,17 +419,34 @@ def plot_posterior(ax, samples, weights, posterior, **kwargs):
     #     span = np.percentile(samples, [0.1, 99.999])
     span[0] = min(0, span[0])
     sx = 0.02
-    bins = int(round(10. / sx))
+    bins = int(round(10.0 / sx))
 
     n, b = np.histogram(samples, bins=bins, weights=weights, range=np.sort(span))
 
-    n = gaussian_filter(n, 10.)
-    n /= n.max()*2 * 1.1
+    n = gaussian_filter(n, 10.0)
+    n /= n.max() * 2 * 1.1
 
-    ax.plot(offset + n,b[:-1],color=kwargs.get("color","tab:grey"),label=kwargs.get("label"))
-    ax.fill_betweenx(b[:-1], offset, offset + n, color=kwargs.get("color", "tab:grey"), alpha=kwargs.get("alpha", 0.7))
+    ax.plot(
+        offset + n,
+        b[:-1],
+        color=kwargs.get("color", "tab:grey"),
+        label=kwargs.get("label"),
+    )
+    ax.fill_betweenx(
+        b[:-1],
+        offset,
+        offset + n,
+        color=kwargs.get("color", "tab:grey"),
+        alpha=kwargs.get("alpha", 0.7),
+    )
 
-    ax.plot(offset,posterior["mean"],"o",color=kwargs.get("color","tab:grey"),markersize=5)
+    ax.plot(
+        offset,
+        posterior["mean"],
+        "o",
+        color=kwargs.get("color", "tab:grey"),
+        markersize=5,
+    )
 
 
 def plot_prior(ax, prior, **kwargs):

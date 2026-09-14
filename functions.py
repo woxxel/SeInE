@@ -3,15 +3,20 @@ from scipy.special import erfinv, erf
 from scipy.stats import norm
 
 
-def halfnorm_ppf(x, loc, scale): 
+def halfnorm_ppf(x, loc, scale):
     return loc + scale * np.sqrt(2) * erfinv(x)
 
-def norm_ppf(x, mean, sigma): 
+
+def norm_ppf(x, mean, sigma):
     return mean + sigma * np.sqrt(2) * erfinv(2 * x - 1)
+
 
 def norm_cdf(x, mean, sigma):
     return 0.5 * (1 + erf((x - mean) / (sigma * np.sqrt(2))))
 
+
+# def sigmoid(x, alpha, beta, theta):
+#     return alpha / (1 + np.exp(-(x - theta) / beta))
 
 # def _phi(x):
 #     return 1./np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2)
@@ -23,7 +28,7 @@ def norm_cdf(x, mean, sigma):
 # def truncated_normal_pdf(x, mean, sigma, low, high):
 #     """ Percent point function (inverse of cdf) for truncated normal distribution """
 #     p_out = np.zeros_like(x)
-    
+
 #     mask_low = x < low
 #     mask_high = x > high
 
@@ -43,15 +48,44 @@ def norm_cdf(x, mean, sigma):
 
 # def truncated_normal_ppf(x, mean, sigma, low, high):
 #     """ Percent point function (inverse of cdf) for truncated normal distribution """
-    
+
 #     psi_low, psi_high = _psi(((low - mean) / sigma, (high - mean) / sigma))
 
 #     scaled_x = psi_low + x * (psi_high - psi_low)
 #     return mean + sigma * np.sqrt(2) * erfinv(2 * scaled_x - 1)
 
+
 def bounded_flat(x, low, high):
     return x * (high - low) + low
 
+
+def circmean_and_std(samples, weights=None, high=np.pi, low=-np.pi, axis=None):
+    samples = np.asarray(samples)
+
+    if weights is None:
+        weights = np.ones_like(samples)
+    else:
+        weights = np.asarray(weights)
+
+    # map to [0, 2π)
+    theta = (samples - low) * 2 * np.pi / (high - low)
+
+    wsum = np.sum(weights, axis=axis)
+
+    C = np.sum(weights * np.cos(theta), axis=axis) / wsum
+    S = np.sum(weights * np.sin(theta), axis=axis) / wsum
+
+    R = np.sqrt(C**2 + S**2)
+
+    mean_theta = np.arctan2(S, C) % (2 * np.pi)
+    mean = mean_theta * (high - low) / (2 * np.pi) + low
+
+    # avoid log(0)
+    R = np.clip(R, 1e-15, 1.0)
+    std_theta = np.sqrt(-2 * np.log(R))
+    std = std_theta * (high - low) / (2 * np.pi)
+
+    return mean, std
 
 
 def _circfuncs_common(samples, high, low):
@@ -86,7 +120,7 @@ def circmean(
     return res * (high - low) / 2.0 / np.pi + low
 
 
-def modulo_with_offset(x,low=0,high=None):
+def modulo_with_offset(x, low=0, high=None):
     if high is None:
         return x
     diff = high - low

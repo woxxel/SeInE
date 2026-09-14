@@ -4,18 +4,21 @@ import logging, os
 import itertools
 import warnings
 
+from scipy.special import gammaln
+
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
 
+
 class HierarchicalModel:
     """
-        Defines a general class for setting up a hierarchical model for bayesian inference. Has to be inherited by a specific model class, which then further specifies the loglikelihood etc
+    Defines a general class for setting up a hierarchical model for bayesian inference. Has to be inherited by a specific model class, which then further specifies the loglikelihood etc
     """
 
     def __init__(self, logLevel=logging.ERROR):
-        '''
-            initialize the class
-        '''
+        """
+        initialize the class
+        """
 
         self.log = logging.getLogger("nestLogger")
         self.set_logLevel(logLevel)
@@ -24,11 +27,11 @@ class HierarchicalModel:
         # os.environ['OPENBLAS_NUM_THREADS'] = '1'
         # os.environ['OMP_NUM_THREADS'] = '1'
 
-    def set_logLevel(self,logLevel):
+    def set_logLevel(self, logLevel):
         self.log.setLevel(logLevel)
 
     def timeit(self, msg=None):
-        if msg is not None:  # and (self.time_ref):
+        if msg is not None and hasattr(self, "time_ref"):  # and (self.time_ref):
             # print(msg)
             self.log.debug(
                 "time for %s: %3.2f ms" % (msg, (time.time() - self.time_ref) * 10**3)
@@ -36,36 +39,40 @@ class HierarchicalModel:
 
         self.time_ref = time.time()
 
-    def prepare_data(self,event_counts,T,dimension_names=None,iter_dims=None):
+    def prepare_data(self, observed_counts, T, dimension_names=None, iter_dims=None):
         """
-            Preprocesses the data, provided as an n_samples x n_conditions x max(n_neuron) array, containing the spike counts of each neuron
-            Dimensionality of event_counts might differ and assumes 1 for each missing dimension
+        Preprocesses the data, provided as an n_samples x n_conditions x max(n_neuron) array, containing the spike counts of each neuron
+        Dimensionality of observed_counts might differ and assumes 1 for each missing dimension
 
-            n_neuron might differ between animals, so the data is usually padded with NaNs
+        n_neuron might differ between animals, so the data is usually padded with NaNs
 
-            INPUT:
-                * event_counts     [int] n_animals x n_conditions x n_datapoints
-                    number of observed events per stimulus during time T
-                * T     [int]
-                    time period of measurement
+        INPUT:
+            * observed_counts     [int] n_animals x n_conditions x n_datapoints
+                number of observed event counts per stimulus during time T
+            * T     [int]
+                time period of measurement
 
-            DIMENSIONS:
-                n_samples:      number of animals in datapool
+        DIMENSIONS:
+            n_samples:      number of animals in datapool
 
-                n_conditions:   could be: drive by different input current, e.g. different orientations
+            n_conditions:   could be: drive by different input current, e.g. different orientations
 
-                n_datapoints:   here: # neurons; could also be: different stimuli (e.g. places, for place fields)
+            n_datapoints:   here: # neurons; could also be: different stimuli (e.g. places, for place fields)
         """
 
-        event_counts = np.atleast_2d(event_counts)
+        observed_counts = np.atleast_2d(observed_counts)
         self.T = T
 
         self.data = {
-            "event_counts":     event_counts,
-            "T":                T,
+            "observed_counts": observed_counts,
+            "T": T,
         }
 
-        dims = self.data["event_counts"].shape
+        self.data["log_factorial_observed_counts"] = gammaln(
+            self.data["observed_counts"] + 1
+        )  # required for loglikelihood calculation, precompute for speed
+
+        dims = self.data["observed_counts"].shape
 
         self.dimensions = {
             "shape": dims,
@@ -78,7 +85,11 @@ class HierarchicalModel:
         }
 
         ## create iterator over all none-data-dimensions (only if required)
-        if iter_dims is not False:
+        if iter_dims is False:
+            self.dimensions["n_iter"] = 0
+            self.dimensions["shape_iter"] = ()
+            self.dimensions["iterator"] = None
+        else:
             if iter_dims is None:
                 iter_dims = np.ones_like(dims, dtype=bool)
                 iter_dims[-1] = False
@@ -101,16 +112,88 @@ class HierarchicalModel:
             self.dims[f"n_{dim}"] = n
 
         self.data["n_neurons"] = np.array(
-            [np.isfinite(events).sum(axis=-1) for events in self.data["event_counts"]]
+            [
+                np.isfinite(counts).sum(axis=-1)
+                for counts in self.data["observed_counts"]
+            ]
         )
+
+    def probability_of_spike_observation(
+        self,
+        model_response_rate,
+        observed_counts=None,
+        T=None,
+        model="poisson",
+        penalty=-100.0,
+        **kwargs,
+    ):
+        if T is None:
+            T = self.data["T"]
+
+        model_response_counts = (
+            # np.broadcast_to(model_response_rate, T.shape) * T
+            model_response_rate
+            * T
+        )  # expected event counts within dwelltime according to model
+
+        if observed_counts is None:
+            observed_counts = self.data["observed_counts"]
+            gammaln_observed_counts = self.data["log_factorial_observed_counts"]
+        else:
+            observed_counts = observed_counts
+            gammaln_observed_counts = gammaln(
+                observed_counts + 1
+            )  # precompute for speed
+
+        # print(model_response_counts.shape, observed_counts.shape)
+        ## get probability to observe N events (amplitude) within dwelltime for each bin in each trial
+        if model == "poisson":
+            logp = (
+                observed_counts * np.log(model_response_counts)
+                - model_response_counts
+                - gammaln_observed_counts
+            )
+        elif model == "negative_binomial":
+            # captures overdispersion compared to poisson, with
+            # Var = mu + alpha * mu^2, where alpha is the overdispersion parameter (alpha=0 reduces to poisson)
+            alpha = kwargs.get("logl_alpha", 0.0)
+            if alpha == 0.0:
+                return self.probability_of_spike_observation(
+                    model_response_rate,
+                    observed_counts,
+                    T,
+                    model="poisson",
+                    penalty=penalty,
+                )
+            r = 1 / alpha
+            p = r / (r + model_response_counts)
+            logp = (
+                gammaln(observed_counts + r)
+                - gammaln(r)
+                - gammaln_observed_counts
+                + r * np.log(p)
+                + observed_counts * np.log1p(-p)
+            )
+        else:
+            raise ValueError(f"unsupported model: {model}")
+
+        logp[~np.isfinite(logp)] = penalty
+        return logp
+
+    def calculate_logp_penalty(self, p_in):
+        """
+        enables adding penalties to the loglikelihood, based on parameter values to enforce some behavior
+        """
+
+        return None
 
     def set_priors(self, priors_init):
         """
-            Set the priors for the model. The priors are defined in the priors_init dictionary, 
-            which has to be the output of the prior_structure function
+        Set the priors for the model. The priors are defined in the priors_init dictionary,
+        which has to be the output of the prior_structure function
 
-            All parameters with the input parameters defined as priors themselves are treated as 
-            hierarchical parameters
+        All parameters with the input parameters defined as priors themselves are treated as
+        hierarchical parameters
         """
 
         self.parameter_names_all = []
@@ -135,7 +218,7 @@ class HierarchicalModel:
 
                 ## add the parameters for the hierarchical prior
                 for sub_key, sub_prior in prior["parameters"].items():
-                    if isinstance(sub_prior,dict):
+                    if isinstance(sub_prior, dict):
                         self.set_prior_param(
                             sub_prior,
                             prior_key,
@@ -143,11 +226,11 @@ class HierarchicalModel:
                         )
 
             ## then, add the actual parameters for the hierarchical prior
-            self.set_prior_param(prior, prior_key, has_meta=prior.get("has_meta", False))
+            self.set_prior_param(
+                prior, prior_key, has_meta=prior.get("has_meta", False)
+            )
 
-    def set_prior_param(
-        self, priors_init, param, key=None, has_meta=False
-    ):
+    def set_prior_param(self, priors_init, param, key=None, has_meta=False):
         """
             sets a single prior variable
         TODO
@@ -163,7 +246,7 @@ class HierarchicalModel:
         # print(f"pre:  {priors_init['shape']} vs {self.dimensions['shape']}")
 
         ## check for proper shapes of priors and align shape
-        shape = priors_init["shape"]# + (1,)
+        shape = priors_init["shape"]  # + (1,)
 
         if self.dimensions.get("n_iter", False):
             assert (
@@ -199,12 +282,16 @@ class HierarchicalModel:
 
             for var in priors_init["parameters"].keys():
                 if self.priors.get(f"{param}_{var}") is None:
-                    self.priors[paramName]["input_constants"][var] = priors_init["parameters"][var]
+                    self.priors[paramName]["input_constants"][var] = priors_init[
+                        "parameters"
+                    ][var]
                 else:
-                    self.priors[paramName][f"idx_{var}"] = self.priors[f"{param}_{var}"][
-                        "idx"
+                    self.priors[paramName][f"idx_{var}"] = self.priors[
+                        f"{param}_{var}"
+                    ]["idx"]
+                    self.priors[paramName][f"n_{var}"] = self.priors[f"{param}_{var}"][
+                        "n"
                     ]
-                    self.priors[paramName][f"n_{var}"] = self.priors[f"{param}_{var}"]["n"]
                     self.priors[paramName]["input_vars"].append(var)
 
             self.priors[paramName]["transform"] = lambda x, params, fun=priors_init[
@@ -224,8 +311,8 @@ class HierarchicalModel:
                 return False, priors_init["periodic"]
             elif priors_init["periodic"] is True:
                 return True, [
-                    priors_init["parameters"]["low"], 
-                    priors_init["parameters"]["high"]
+                    priors_init["parameters"]["low"],
+                    priors_init["parameters"]["high"],
                 ]
             else:
                 return False, False
@@ -239,28 +326,34 @@ class HierarchicalModel:
 
             self.reflective.append(priors_init["reflective"])
         else:
-            self.parameter_names_all.extend([f"{paramName}_{i}" for i in range(self.priors[paramName]["n"])])
+            self.parameter_names_all.extend(
+                [f"{paramName}_{i}" for i in range(self.priors[paramName]["n"])]
+            )
 
             periodic, bounds = get_periodicity(priors_init)
             self.periodic.extend([periodic for _ in range(self.priors[paramName]["n"])])
-            self.periodic_boundaries.extend([bounds for _ in range(self.priors[paramName]["n"])])
+            self.periodic_boundaries.extend(
+                [bounds for _ in range(self.priors[paramName]["n"])]
+            )
 
-            self.reflective.extend([priors_init["reflective"] for _ in range(self.priors[paramName]["n"])])
+            self.reflective.extend(
+                [priors_init["reflective"] for _ in range(self.priors[paramName]["n"])]
+            )
 
-    def set_prior_transform(self,vectorized=True):
-        '''
-            sets the prior transform function for the model
+    def set_prior_transform(self, vectorized=False):
+        """
+        sets the prior transform function for the model
 
-            only takes as input the mode, which can be either of
-            - 'vectorized': vectorized prior transform function
-            - 'scalar': scalar prior transform function
-            - 'tensor': tensor prior transform function
-        '''
-        def prior_transform_single(p_in,key):
+        only takes as input the mode, which can be either of
+        - 'vectorized': vectorized prior transform function
+        - 'scalar': scalar prior transform function
+        - 'tensor': tensor prior transform function
+        """
 
+        def prior_transform_single(p_in, key):
             """
-                transforms a single prior parameter from unit hypercube to actual prior
-                and stores value in "current_value" field of prior for quick access
+            transforms a single prior parameter from unit hypercube to actual prior
+            and stores value in "current_value" field of prior for quick access
             """
 
             # print(f"Transforming {key} with shape {p_in.shape}")
@@ -271,24 +364,22 @@ class HierarchicalModel:
                 input_keys["params"] = {}
 
                 for var in this_prior["input_vars"]:
-                    input_keys["params"][var] = self.priors[f"{key}_{var}"]["current_value"]
+                    input_keys["params"][var] = self.priors[f"{key}_{var}"][
+                        "current_value"
+                    ]
                 for var in this_prior["input_constants"]:
                     input_keys["params"][var] = this_prior["input_constants"][var]
 
-            this_prior["current_value"] = this_prior["transform"](
-                p_in, 
-                **input_keys
-            )
+            this_prior["current_value"] = this_prior["transform"](p_in, **input_keys)
             return this_prior["current_value"]
 
         def prior_transform(p_in):
-
             """
-                The actual prior transform function, which transforms the random variables from the unit hypercube to the actual priors
+            The actual prior transform function, which transforms the random variables from the unit hypercube to the actual priors
             """
 
-            if len(p_in.shape)==1:
-                p_in = p_in[np.newaxis,...]
+            if len(p_in.shape) == 1:
+                p_in = p_in[np.newaxis, ...]
             n_chain = p_in.shape[0]
 
             p_out = np.zeros_like(p_in)
@@ -297,21 +388,25 @@ class HierarchicalModel:
                 if prior["transform"] is None:
                     continue
 
-                p_out[:, prior["idx"] : prior["idx"] + prior["n"]] = prior_transform_single(
-                    p_in[:, prior["idx"]:prior["idx"] + prior["n"]].reshape((n_chain,)+prior["shape"]),
-                    key
-                ).reshape((n_chain,-1))
+                p_out[:, prior["idx"] : prior["idx"] + prior["n"]] = (
+                    prior_transform_single(
+                        p_in[:, prior["idx"] : prior["idx"] + prior["n"]].reshape(
+                            (n_chain,) + prior["shape"]
+                        ),
+                        key,
+                    ).reshape((n_chain, -1))
+                )
 
             if vectorized:
                 return p_out
             else:
-                return p_out[0,:]
+                return p_out[0, :]
 
         return prior_transform
 
     def get_params_from_p(self, p_in, idx_chain=None, idx=None):
         """
-            obtains a human readable, structured dictionary of parameters from the input p_in
+        obtains a human readable, structured dictionary of parameters from the input p_in
         """
         if len(p_in.shape) == 1:
             p_in = p_in[np.newaxis, :]
@@ -322,21 +417,29 @@ class HierarchicalModel:
         params = {}
         for var in self.parameter_names:
             params[var] = np.zeros(
-                ((n_chains,) if idx_chain is None else ()) +
-                (self.priors[var]["shape"] if idx is None else ())
+                ((n_chains,) if idx_chain is None else ())
+                + (self.priors[var]["shape"] if idx is None else ())
             )
 
             if self.priors[var].get("transform"):
 
                 ## build appropriate slice
                 if idx is None:
-                    slice_sample = slice(self.priors[var]["idx"],self.priors[var]["idx"] + self.priors[var]["n"])
+                    slice_sample = slice(
+                        self.priors[var]["idx"],
+                        self.priors[var]["idx"] + self.priors[var]["n"],
+                    )
 
                 else:
 
-                    offset_effective_nd = tuple(idx_ if self.priors[var]["shape"][i] > 1 else 0 for i, idx_ in enumerate(idx))
+                    offset_effective_nd = tuple(
+                        idx_ if self.priors[var]["shape"][i] > 1 else 0
+                        for i, idx_ in enumerate(idx)
+                    )
 
-                    offset_effective = np.ravel_multi_index(offset_effective_nd, self.priors[var]["shape"])
+                    offset_effective = np.ravel_multi_index(
+                        offset_effective_nd, self.priors[var]["shape"]
+                    )
 
                     idx_effective = self.priors[var]["idx"] + offset_effective
                     slice_sample = slice(idx_effective, idx_effective + 1)
