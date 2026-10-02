@@ -1,7 +1,5 @@
 import inspect
 
-
-
 def prior_structure(function=None, shape=(1,), label=None, periodic=False, reflective=False,**kwargs):
     """
     creates a dictionary with appropriate structure for the prior distribution

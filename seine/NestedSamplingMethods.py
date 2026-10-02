@@ -1,12 +1,4 @@
-# from multiprocessing.pool import Pool
 import logging, os
-
-# os.environ["OMP_NUM_THREADS"] = "1"
-# os.environ["OPENBLAS_NUM_THREADS"] = "1"
-# os.environ["MKL_NUM_THREADS"] = "1"
-# os.environ["BLIS_NUM_THREADS"] = "1"
-# os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 import numpy as np
 
 from matplotlib import pyplot as plt
@@ -14,14 +6,8 @@ from matplotlib import pyplot as plt
 from scipy.ndimage import gaussian_filter1d as gauss_filter
 from scipy.interpolate import interp1d
 
-from dynesty import NestedSampler  # , pool as dypool
+from dynesty import NestedSampler
 import pathos.multiprocessing as mp
-
-# import dill
-# import dynesty.utils
-# from dynesty import pool as dypool
-
-# from pathos.multiprocessing import ProcessingPool
 
 from .structures import parse_name_and_indices
 from .functions import (
@@ -29,8 +15,6 @@ from .functions import (
     circmean_and_std,
     modulo_with_offset,
 )
-
-# dynesty.utils.pickle_module = dill
 
 
 class PathosPool:

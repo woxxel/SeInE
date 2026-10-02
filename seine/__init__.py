@@ -10,3 +10,5 @@ from .functions import (
     norm_cdf,
     bounded_flat,
 )
+
+__version__ = "0.1.0"
