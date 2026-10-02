@@ -1,9 +1,13 @@
 from .HierarchicalModelDefinition import HierarchicalModel
+
+from .NestedSamplingMethods import run_sampling
+
 from .structures import (
     prior_structure,
     build_key,
     parse_name_and_indices,
 )
+
 from .functions import (
     halfnorm_ppf,
     norm_ppf,

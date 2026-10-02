@@ -167,6 +167,7 @@ class HierarchicalModel:
                 )
             r = 1 / alpha
             p = r / (r + model_response_counts)
+            p = np.clip(p, 1e-300, 1.0)
             logp = (
                 gammaln(observed_counts + r)
                 - gammaln(r)
