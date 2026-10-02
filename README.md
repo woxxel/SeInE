@@ -1,0 +1,1 @@
+A wrapper for defining an arbitrary Hierarchical Bayes model for event-count estimation with a given likelihood to evaluate using dynesty.
