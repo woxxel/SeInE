@@ -1,2 +1,4 @@
 *.pyc
 *.egg-info/
+
+seine/_version.py
